@@ -1,0 +1,610 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>3D 油電站地圖</title>
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+/* 流程:先由系統算出「最划算」(油價 + 來回油費),地圖直接標出品牌與價錢並畫出路線,不用在地圖和清單之間來回對照。 */
+:root {
+  --display: "Barlow Condensed", "Arial Narrow", sans-serif;
+  --body: "Noto Sans TC", system-ui, -apple-system, "PingFang TC", "Microsoft JhengHei", sans-serif;
+  --bg: #f2f4f7; --surface: #ffffff; --fg: #101828; --muted: #667085; --line: #e4e7ec;
+  --route: #1a73e8; --good: #12a150; --warn: #e69a00; --bad: #e5483a;
+  --ev: #0e9f94; --ev2: #3b82f6; --slow: #667085;
+  --petrol: #f59e0b; --diesel: #2563eb; --mode: var(--petrol); --on-mode: #101828;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--fg); font: 14px/1.45 var(--body); }
+button, input, a { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--route); outline-offset: 2px; }
+
+.app { position: fixed; inset: 0; display: grid; grid-template-rows: auto minmax(0, 1fr) auto; grid-template-areas: "top" "map" "panel"; padding-top: env(safe-area-inset-top, 0px); }
+.app[data-mode="diesel"] { --mode: var(--diesel); --on-mode: #fff; }
+.app[data-mode="ev"] { --mode: var(--ev); --on-mode: #fff; }
+.top { grid-area: top; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding: 10px 16px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.brand { min-width: 0; }
+.brand h1 { margin: 0; font-size: 1.05rem; font-weight: 700; }
+.brand p { margin: 0; color: var(--muted); font-size: .72rem; }
+.seg { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; padding: 3px; flex: 1 1 220px; max-width: 320px; background: var(--bg); border-radius: 12px; }
+.seg button { min-height: 36px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font-weight: 500; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--mode); color: var(--on-mode); font-weight: 700; }
+
+.mapwrap { grid-area: map; position: relative; min-height: 0; }
+#map { position: absolute; inset: 0; }
+.fab { position: absolute; right: 10px; top: 10px; display: grid; gap: 8px; z-index: 2; }
+.fab button { min-width: 44px; min-height: 44px; padding: 0 10px; border: 0; border-radius: 12px; background: var(--surface); box-shadow: 0 1px 6px rgba(16, 24, 40, .3); font-weight: 700; cursor: pointer; font-size: .8rem; }
+.legend { position: absolute; left: 10px; top: 10px; z-index: 2; max-width: calc(100% - 76px); display: flex; flex-wrap: wrap; gap: 2px 12px; padding: 6px 10px; border-radius: 10px; background: rgba(255, 255, 255, .92); box-shadow: 0 1px 6px rgba(16, 24, 40, .25); font-size: .72rem; }
+.legend i { display: inline-block; width: 9px; height: 9px; margin-right: 5px; border-radius: 50%; }
+.here { position: absolute; left: 50%; bottom: 14px; transform: translateX(-50%); z-index: 2; min-height: 40px; padding: 0 16px; border: 0; border-radius: 999px; background: var(--fg); color: #fff; font-weight: 700; cursor: pointer; box-shadow: 0 2px 8px rgba(16, 24, 40, .4); }
+.toast { position: absolute; left: 50%; top: 58px; transform: translateX(-50%); z-index: 3; width: max-content; max-width: calc(100% - 32px); padding: 9px 14px; border-radius: 10px; background: var(--fg); color: #fff; font-size: .82rem; text-align: center; }
+
+.panel { grid-area: panel; max-height: 50vh; max-height: 50dvh; overflow-y: auto; background: var(--surface); border-top: 1px solid var(--line); padding: 12px 16px calc(14px + env(safe-area-inset-bottom, 0px)); display: grid; gap: 12px; align-content: start; }
+.hero { display: grid; gap: 9px; padding: 12px 14px; border: 2px solid var(--fg); border-radius: 16px; }
+.hero.muted { border-color: var(--line); color: var(--muted); }
+.tag { justify-self: start; padding: 2px 10px; border-radius: 999px; background: var(--good); color: #fff; font-size: .74rem; font-weight: 700; }
+.tag.sel { background: var(--route); }
+.hero-main { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.hero-main > div:first-child { min-width: 0; }
+.hero h2 { margin: 0; font-size: 1.15rem; overflow-wrap: anywhere; }
+.hero p { margin: 2px 0 0; color: var(--muted); font-size: .8rem; overflow-wrap: anywhere; }
+.hero-price { flex: none; font: 700 2.6rem/1 var(--display); font-variant-numeric: tabular-nums; }
+.hero-price small { font-size: 1.1rem; color: var(--muted); margin-left: 2px; }
+.facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.fact { display: grid; gap: 1px; padding: 7px 8px; border-radius: 10px; background: var(--bg); min-width: 0; }
+.fact span { color: var(--muted); font-size: .68rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fact b { font: 700 1.15rem/1.2 var(--display); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.fact b.na { font: 500 .8rem/1.6 var(--body); color: var(--muted); }
+.why { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; font-size: .82rem; }
+.why li { padding-left: 14px; position: relative; }
+.why li::before { content: ""; position: absolute; left: 2px; top: .6em; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+.acts { display: flex; flex-wrap: wrap; gap: 8px; }
+.btn { display: inline-flex; align-items: center; justify-content: center; min-height: 42px; padding: 0 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); text-decoration: none; font-weight: 700; cursor: pointer; }
+.btn.primary { background: var(--route); border-color: var(--route); color: #fff; flex: 1 1 140px; }
+
+.ctrl { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.chip { min-height: 34px; padding: 0 14px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--muted); cursor: pointer; font-size: .82rem; }
+.chip[aria-pressed="true"] { background: var(--fg); border-color: var(--fg); color: #fff; font-weight: 700; }
+.count { margin-left: auto; color: var(--muted); font-size: .78rem; }
+details.car { border: 1px solid var(--line); border-radius: 12px; padding: 0 12px; }
+details.car summary { min-height: 40px; display: flex; align-items: center; cursor: pointer; font-weight: 500; }
+.car-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding-bottom: 12px; }
+.car-grid label { display: grid; gap: 4px; color: var(--muted); font-size: .76rem; }
+.car-grid input { min-height: 38px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--fg); }
+
+.list { display: grid; gap: 8px; }
+.card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 2px 10px; padding: 10px 12px; text-align: left; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); cursor: pointer; width: 100%; }
+.card[aria-pressed="true"] { border-color: var(--fg); box-shadow: 0 0 0 1px var(--fg); }
+.rank { grid-row: 1 / span 2; width: 24px; height: 24px; border-radius: 7px; background: var(--bg); color: var(--muted); font: 700 .82rem/24px var(--display); text-align: center; }
+.c-name { font-weight: 700; overflow-wrap: anywhere; }
+.c-name em { margin-left: 6px; padding: 1px 7px; border-radius: 999px; background: var(--good); color: #fff; font-size: .68rem; font-style: normal; }
+.c-sub { grid-column: 2; color: var(--muted); font-size: .76rem; overflow-wrap: anywhere; }
+.c-price { grid-column: 3; grid-row: 1 / span 2; display: flex; align-items: baseline; gap: 2px; font: 700 1.9rem/1 var(--display); font-variant-numeric: tabular-nums; }
+.c-price small { font-size: .85rem; color: var(--muted); }
+.dot { align-self: center; width: 9px; height: 9px; margin-right: 6px; border-radius: 50%; }
+.empty { margin: 0; padding: 16px; border: 1px dashed var(--line); border-radius: 12px; color: var(--muted); text-align: center; }
+.foot { margin: 0; color: var(--muted); font-size: .7rem; }
+
+/* 地圖上的價錢標籤 */
+.pin { cursor: pointer; }
+.bubble { position: relative; display: flex; align-items: center; gap: 5px; padding: 4px 9px; border-radius: 999px; background: var(--c, var(--slow)); color: #fff; border: 2px solid #fff; box-shadow: 0 2px 6px rgba(16, 24, 40, .4); white-space: nowrap; }
+.bubble::after { content: ""; position: absolute; left: 50%; bottom: -7px; width: 10px; height: 10px; background: var(--c, var(--slow)); border: 2px solid #fff; border-top: 0; border-left: 0; transform: translateX(-50%) rotate(45deg); }
+.pin .nm { font: 500 11px/1 var(--body); opacity: .95; }
+.pin .pr { font: 700 16px/1 var(--display); letter-spacing: .01em; }
+.pin.dot .nm, .pin.dot .pr { display: none; }
+.pin.dot .bubble { width: 16px; height: 16px; padding: 0; }
+.pin.dot .bubble::after { display: none; }
+.pin.best .bubble { transform: scale(1.12); box-shadow: 0 0 0 3px var(--fg), 0 3px 8px rgba(16, 24, 40, .5); }
+.pin.sel .bubble { transform: scale(1.18); background: var(--fg); }
+.pin.sel .bubble::after { background: var(--fg); }
+.me { width: 22px; height: 22px; border-radius: 50%; background: var(--route); border: 3px solid #fff; box-shadow: 0 0 0 0 rgba(26, 115, 232, .5), 0 1px 6px rgba(16, 24, 40, .5); animation: pulse 2s infinite; cursor: grab; }
+@keyframes pulse { 70% { box-shadow: 0 0 0 16px rgba(26, 115, 232, 0), 0 1px 6px rgba(16, 24, 40, .5); } 100% { box-shadow: 0 0 0 0 rgba(26, 115, 232, 0), 0 1px 6px rgba(16, 24, 40, .5); } }
+
+@media (min-width: 900px) {
+  .app { grid-template-columns: 420px minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); grid-template-areas: "top map" "panel map"; }
+  .top { border-right: 1px solid var(--line); }
+  .panel { max-height: none; border-top: 0; border-right: 1px solid var(--line); }
+}
+@media (prefers-reduced-motion: reduce) { .me { animation: none; } }
+</style>
+</head>
+<body>
+<div class="app" id="app" data-mode="unleaded">
+  <header class="top">
+    <div class="brand">
+      <h1>3D 油電站地圖</h1>
+      <p id="sub">站點來自 OpenStreetMap</p>
+    </div>
+    <div class="seg" role="group" aria-label="類型">
+      <button type="button" data-mode="unleaded" aria-pressed="true">汽油</button>
+      <button type="button" data-mode="diesel" aria-pressed="false">柴油</button>
+      <button type="button" data-mode="ev" aria-pressed="false">充電</button>
+    </div>
+  </header>
+
+  <main class="mapwrap">
+    <div id="map" aria-label="地圖"></div>
+    <div class="legend" id="legend"></div>
+    <div class="fab">
+      <button type="button" id="locBtn" aria-label="定位到我的位置">定位</button>
+      <button type="button" id="tiltBtn" aria-label="切換 2D 和 3D">2D</button>
+    </div>
+    <button type="button" class="here" id="hereBtn" hidden>搜尋此區域</button>
+    <div class="toast" id="toast" hidden></div>
+  </main>
+
+  <aside class="panel" id="panel">
+    <section id="hero"></section>
+    <div class="ctrl">
+      <div id="chips" class="ctrl"></div>
+      <span class="count" id="count"></span>
+    </div>
+    <details class="car" id="car">
+      <summary>我的車(影響「最划算」的計算)</summary>
+      <div class="car-grid" id="carGrid"></div>
+    </details>
+    <div class="list" id="list"></div>
+    <p class="foot" id="foot"></p>
+  </aside>
+</div>
+
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  /* ===== 設定 ===== */
+  var CONFIG = {
+    /* 官方燃油價格要經你自己的後端轉發(需要 OAuth 憑證,不能放在網頁裡)。
+       留空 = 使用示範價錢。接上後端時回傳 JSON 陣列:
+       [{ "lat": 51.24, "lng": -0.59, "brand": "Esso", "prices": { "E10": 174.9, "B7": 184.9 }, "updated": "2026-10-05T17:26:00Z" }]
+       GET {PRICE_API_URL}?lat=..&lng=..&radius=8000 */
+    PRICE_API_URL: '',
+    RADIUS_M: 8000,
+    OSRM: 'https://router.project-osrm.org',
+    STYLE: 'https://tiles.openfreemap.org/styles/liberty',
+    DEFAULT: { lat: 51.2362, lng: -0.5704 },
+    OVERPASS: ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter']
+  };
+
+  var $ = function (id) { return document.getElementById(id); };
+  var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); };
+  var store = {
+    get: function (k, d) { try { var v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
+    set: function (k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} }
+  };
+  var state = {
+    mode: 'unleaded', sort: 'value', user: { lat: CONFIG.DEFAULT.lat, lng: CONFIG.DEFAULT.lng, source: 'default' },
+    center: null, stations: [], sel: null, manual: false, status: 'idle',
+    car: Object.assign({ litres: 55, mpg: 40, kwh: 30, maxkw: 100 }, store.get('car', {}))
+  };
+  var map, mapReady = false, userMarker, pins = [], view = null, token = 0, routeTok = 0, layoutTimer, toastTimer;
+
+  /* ===== 計算 ===== */
+  function hav(a, b) {
+    var R = 6371000, r = Math.PI / 180, dLat = (b.lat - a.lat) * r, dLng = (b.lng - a.lng) * r;
+    var h = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    return 2 * R * Math.asin(Math.sqrt(h));
+  }
+  function hash(str) { var h = 2166136261; for (var i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0) / 4294967295; }
+  var BRAND_ADJ = { tesco: -3.5, sainsbury: -3, asda: -4, morrisons: -3, costco: -6, bp: 1.5, shell: 2, esso: 1, texaco: 0.5, jet: -1.5, murco: -0.5 };
+  function demoPrices(s) {
+    var key = (s.brand || '').toLowerCase(), adj = 0;
+    Object.keys(BRAND_ADJ).forEach(function (k) { if (key.indexOf(k) >= 0) adj = BRAND_ADJ[k]; });
+    var u = Math.round(173.9 + (hash(s.id) - 0.5) * 6 + adj - 0.9) + 0.9;
+    var d = Math.round(u + 7 + hash(s.id + 'd') * 3 - 0.9) + 0.9;
+    return { unleaded: u, diesel: d };
+  }
+  function estRoad(s) { var m = hav(state.user, s) * 1.3; return { m: m, s: m / 8.94, exact: false }; }
+  function roadOf(s) { return s.road || estRoad(s); }
+  function metrics(s) {
+    var r = roadOf(s), mi = r.m / 1609.34, o = { mi: mi, min: r.s / 60, exact: r.exact };
+    if (s.kind === 'fuel') {
+      var p = s.prices[state.mode];
+      o.p = p; o.fill = p / 100 * state.car.litres;
+      o.trip = 2 * mi * (4.54609 / state.car.mpg) * (p / 100);
+      o.total = o.fill + o.trip;
+    } else {
+      o.kw = s.ev.kw || 7;
+      o.chargeMin = state.car.kwh / Math.min(o.kw, state.car.maxkw) * 60;
+      o.totalMin = o.min + o.chargeMin;
+    }
+    return o;
+  }
+  function inMode(s) { return state.mode === 'ev' ? s.kind === 'ev' : (s.kind === 'fuel' && s.prices && s.prices[state.mode] != null); }
+  function buildView() {
+    var items = state.stations.filter(inMode).map(function (s) { return { s: s, m: metrics(s) }; });
+    var ev = state.mode === 'ev';
+    if (!items.length) return { items: [], best: null, nearest: null };
+    var byBest = items.slice().sort(ev ? function (a, b) { return a.m.totalMin - b.m.totalMin; } : function (a, b) { return a.m.total - b.m.total; });
+    var nearest = items.slice().sort(function (a, b) { return a.m.mi - b.m.mi; })[0];
+    if (!ev) {
+      var byPrice = items.slice().sort(function (a, b) { return a.m.p - b.m.p; });
+      byPrice.forEach(function (it, i) { var f = i / byPrice.length; it.tone = f < 0.34 ? 'good' : f < 0.67 ? 'warn' : 'bad'; });
+    } else {
+      items.forEach(function (it) { it.tone = it.m.kw >= 50 ? 'ev' : it.m.kw >= 22 ? 'ev2' : 'slow'; });
+    }
+    var sorters = {
+      value: byBest, fast: byBest,
+      price: items.slice().sort(function (a, b) { return a.m.p - b.m.p || a.m.mi - b.m.mi; }),
+      dist: items.slice().sort(function (a, b) { return a.m.mi - b.m.mi; }),
+      power: items.slice().sort(function (a, b) { return b.m.kw - a.m.kw || a.m.mi - b.m.mi; })
+    };
+    var list = sorters[state.sort] || byBest;
+    return { items: list, best: byBest[0], nearest: nearest };
+  }
+
+  /* ===== 資料:OpenStreetMap + 價錢 ===== */
+  function overpassQuery(c) {
+    var a = '(around:' + CONFIG.RADIUS_M + ',' + c.lat.toFixed(5) + ',' + c.lng.toFixed(5) + ')';
+    return '[out:json][timeout:25];(node["amenity"="fuel"]' + a + ';way["amenity"="fuel"]' + a + ';node["amenity"="charging_station"]' + a + ';way["amenity"="charging_station"]' + a + ';);out center tags;';
+  }
+  function fetchOverpass(c) {
+    var key = 'ov:' + c.lat.toFixed(2) + ',' + c.lng.toFixed(2);
+    try { var cached = sessionStorage.getItem(key); if (cached) return Promise.resolve(JSON.parse(cached)); } catch (e) {}
+    var body = 'data=' + encodeURIComponent(overpassQuery(c)), i = 0;
+    function attempt(err) {
+      if (i >= CONFIG.OVERPASS.length) return Promise.reject(err || new Error('overpass'));
+      var ep = CONFIG.OVERPASS[i++];
+      return fetch(ep, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body })
+        .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+        .then(function (j) { try { sessionStorage.setItem(key, JSON.stringify(j)); } catch (e) {} return j; })
+        .catch(attempt);
+    }
+    return attempt();
+  }
+  var SOCKETS = { type2: 'Type 2', type2_combo: 'CCS', chademo: 'CHAdeMO', tesla_supercharger: 'Tesla', type2_cable: 'Type 2', type1_combo: 'CCS' };
+  function parseKw(t) {
+    var max = 0;
+    Object.keys(t).forEach(function (k) {
+      if (/^socket:[^:]+:output$/.test(k) || k === 'charging_station:output') {
+        String(t[k]).split(';').forEach(function (part) {
+          var m = part.match(/([\d.]+)\s*(kW|W)?/i);
+          if (!m) return;
+          var v = parseFloat(m[1]), u = (m[2] || '').toLowerCase();
+          if (u === 'w' || (!u && v > 1000)) v /= 1000;
+          if (v > max && v <= 1000) max = v;
+        });
+      }
+    });
+    return max || null;
+  }
+  function parseStations(json) {
+    var out = [];
+    (json.elements || []).forEach(function (el) {
+      var t = el.tags || {}, lat = el.lat != null ? el.lat : el.center && el.center.lat, lng = el.lon != null ? el.lon : el.center && el.center.lon;
+      if (lat == null || lng == null) return;
+      var base = { id: el.type[0] + el.id, lat: lat, lng: lng, street: t['addr:street'] || t['addr:city'] || '', postcode: t['addr:postcode'] || '', hours: t.opening_hours || '' };
+      if (t.amenity === 'fuel') {
+        var brand = t.brand || t.name || t.operator || '加油站';
+        var s = Object.assign(base, { kind: 'fuel', brand: brand, name: brand, tags: [] });
+        if (/24\/7/.test(t.opening_hours || '')) s.tags.push('24 小時');
+        if (t.car_wash === 'yes') s.tags.push('洗車');
+        if (t.shop === 'convenience' || t['shop'] === 'yes') s.tags.push('便利店');
+        out.push(s);
+      } else if (t.amenity === 'charging_station') {
+        if (t.motorcar === 'no') return;
+        var kw = parseKw(t), socks = [];
+        Object.keys(SOCKETS).forEach(function (k) { if (t['socket:' + k] && t['socket:' + k] !== '0' && socks.indexOf(SOCKETS[k]) < 0) socks.push(SOCKETS[k]); });
+        var name = t.operator || t.brand || t.network || t.name || '充電站';
+        out.push(Object.assign(base, { kind: 'ev', brand: name, name: name, tags: [], ev: { kw: kw, sockets: socks, points: parseInt(t.capacity, 10) || null, fee: t.fee || '' } }));
+      }
+    });
+    return out;
+  }
+  function applyPrices(c) {
+    var fuel = state.stations.filter(function (s) { return s.kind === 'fuel'; });
+    if (!CONFIG.PRICE_API_URL) {
+      fuel.forEach(function (s) { s.prices = demoPrices(s); s.demo = true; });
+      return Promise.resolve();
+    }
+    var url = CONFIG.PRICE_API_URL + (CONFIG.PRICE_API_URL.indexOf('?') < 0 ? '?' : '&') + 'lat=' + c.lat + '&lng=' + c.lng + '&radius=' + CONFIG.RADIUS_M;
+    return fetch(url).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }).then(function (arr) {
+      fuel.forEach(function (s) {
+        var best = null, bd = 80;
+        arr.forEach(function (e) { var d = hav(s, e); if (d < bd) { bd = d; best = e; } });
+        if (best && best.prices) { s.prices = { unleaded: best.prices.E10 != null ? best.prices.E10 : null, diesel: best.prices.B7 != null ? best.prices.B7 : null }; s.updated = best.updated; }
+        else s.prices = null;
+      });
+    }).catch(function () {
+      fuel.forEach(function (s) { s.prices = demoPrices(s); s.demo = true; });
+      toast('讀不到真實價錢,暫時顯示示範價錢。');
+    });
+  }
+  function fetchTable(cands, tok) {
+    if (!cands.length) return Promise.resolve();
+    var u = state.user, coords = [u].concat(cands).map(function (p) { return p.lng.toFixed(5) + ',' + p.lat.toFixed(5); }).join(';');
+    var url = CONFIG.OSRM + '/table/v1/driving/' + coords + '?sources=0&annotations=duration,distance';
+    return fetch(url).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }).then(function (j) {
+      if (tok !== token || !j.durations) return;
+      cands.forEach(function (s, i) {
+        var d = j.distances && j.distances[0][i + 1], t = j.durations[0][i + 1];
+        if (d != null && t != null) s.road = { m: d, s: t, exact: true };
+      });
+      var wasAuto = !state.manual; render(wasAuto);
+    }).catch(function () {});
+  }
+  function refineRoads(tok) {
+    var cands = state.stations.filter(inMode).filter(function (s) { return !s.road; })
+      .sort(function (a, b) { return hav(state.user, a) - hav(state.user, b); }).slice(0, 24);
+    return fetchTable(cands, tok);
+  }
+
+  function loadStations(center) {
+    var tok = ++token;
+    state.status = 'loading'; renderHero(); 
+    return fetchOverpass(center).then(function (json) {
+      if (tok !== token) return;
+      state.stations = parseStations(json);
+      return applyPrices(center).then(function () {
+        if (tok !== token) return;
+        state.center = center; state.status = 'ok'; state.manual = false;
+        $('hereBtn').hidden = true;
+        render(true); refineRoads(tok);
+      });
+    }).catch(function () {
+      if (tok !== token) return;
+      state.status = 'error'; render(false);
+    });
+  }
+
+  /* ===== 介面 ===== */
+  function short(n) { n = String(n); return n.length > 10 ? n.slice(0, 9) + '…' : n; }
+  function miText(it) { return (it.m.exact ? '' : '≈') + it.m.mi.toFixed(1) + ' mi'; }
+  function minShort(it) { return (it.m.exact ? '' : '≈') + Math.max(1, Math.round(it.m.min)) + ' 分'; }
+  function minText(it) { return (it.m.exact ? '' : '≈') + Math.max(1, Math.round(it.m.min)) + ' 分鐘'; }
+  function addr(s) { return [s.street, s.postcode].filter(Boolean).join(' · '); }
+  function money(v) { return '£' + v.toFixed(2); }
+  function navLinks(s) {
+    var u = state.user;
+    return '<a class="btn primary" target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&origin=' + u.lat + ',' + u.lng + '&destination=' + s.lat + ',' + s.lng + '&travelmode=driving">用 Google Maps 導航</a>' +
+      '<a class="btn" target="_blank" rel="noopener" href="https://waze.com/ul?ll=' + s.lat + ',' + s.lng + '&navigate=yes">Waze</a>' +
+      '<a class="btn" target="_blank" rel="noopener" href="https://maps.apple.com/?daddr=' + s.lat + ',' + s.lng + '&dirflg=d">Apple 地圖</a>';
+  }
+  function fact(label, value, na) { return '<div class="fact"><span>' + label + '</span><b' + (na ? ' class="na"' : '') + '>' + value + '</b></div>'; }
+
+  function renderHero() {
+    var el = $('hero');
+    if (state.status === 'loading' || state.status === 'idle') { el.innerHTML = '<div class="hero muted"><b>正在搜尋附近的站點…</b><span>用 OpenStreetMap 資料,並計算路程。</span></div>'; return; }
+    if (state.status === 'error') { el.innerHTML = '<div class="hero muted"><b>讀取站點失敗</b><span>可能是網絡問題或查詢太頻繁。</span><div class="acts"><button type="button" class="btn" id="retry">重試</button></div></div>'; return; }
+    if (!view || !view.best) { el.innerHTML = '<div class="hero muted"><b>附近沒有符合的站點</b><span>試試拖動地圖到別處,再按「搜尋此區域」。</span></div>'; return; }
+    var it = view.items.filter(function (x) { return x.s.id === state.sel; })[0] || view.best, s = it.s, ev = s.kind === 'ev';
+    var isBest = it === view.best, why = [], facts, main;
+    if (!ev) {
+      main = it.m.p.toFixed(1) + '<small>p</small>';
+      facts = fact('路程 · ' + minShort(it), miText(it).replace(' mi', '') + ' mi') + fact('加油 ' + state.car.litres + ' L', money(it.m.fill)) + fact('來回油費', money(it.m.trip)) + fact('總成本', money(it.m.total));
+      if (isBest) why.push('<b>總成本最低</b>(加油費 + 來回油費)');
+      else why.push('比最佳選擇 ' + esc(view.best.s.name) + ' 貴 ' + money(it.m.total - view.best.m.total));
+      if (view.nearest === it) why.push('也是最近的一間');
+      else { var d = view.nearest.m.total - it.m.total; why.push('比最近的 ' + esc(view.nearest.s.name) + '(' + miText(view.nearest) + ')' + (d >= 0 ? '平 ' : '貴 ') + money(Math.abs(d))); }
+      var ties = view.items.filter(function (x) { return x !== it && Math.abs(x.m.p - it.m.p) < 0.05; });
+      if (ties.length) {
+        var closest = ties.concat([it]).sort(function (a, b) { return a.m.mi - b.m.mi; })[0];
+        why.push('同價 ' + it.m.p.toFixed(1) + 'p 還有 ' + ties.slice(0, 3).map(function (x) { return esc(x.s.name) + '(' + miText(x) + ')'; }).join('、') + (closest === it ? ',其中這間最近' : ',其中 ' + esc(closest.s.name) + ' 更近'));
+      }
+      if (s.demo) why.push('價錢是示範數字,不是真實價錢');
+    } else {
+      main = (s.ev.kw ? Math.round(s.ev.kw) : '?') + '<small>kW</small>';
+      facts = fact('路程 · ' + minShort(it), miText(it).replace(' mi', '') + ' mi') + fact('預計充電', Math.round(it.m.chargeMin) + ' 分') + fact('電價', '沒有資料', true) + fact('空位', '沒有資料', true);
+      if (isBest) why.push('<b>最快完成</b>(行車時間 + 充電時間)');
+      else why.push('比最佳選擇 ' + esc(view.best.s.name) + ' 多 ' + Math.round(it.m.totalMin - view.best.m.totalMin) + ' 分鐘');
+      if (view.nearest === it) why.push('也是最近的一間');
+      if (!s.ev.kw) why.push('資料沒有標明功率,以 7 kW 估算');
+    }
+    var tags = (s.tags || []).concat(ev ? s.ev.sockets : []);
+    el.innerHTML = '<div class="hero"><span class="tag' + (isBest ? '' : ' sel') + '">' + (isBest ? '★ 最佳選擇' : '目前選擇') + '</span>' +
+      '<div class="hero-main"><div><h2>' + esc(s.name) + '</h2><p>' + esc(addr(s) || '位置見地圖') + (tags.length ? ' · ' + esc(tags.join(' · ')) : '') + '</p></div><div class="hero-price">' + main + '</div></div>' +
+      '<div class="facts">' + facts + '</div><ul class="why">' + why.map(function (w) { return '<li>' + w + '</li>'; }).join('') + '</ul>' +
+      '<div class="acts">' + navLinks(s) + (isBest ? '' : '<button type="button" class="btn" id="goBest">回到最佳選擇</button>') + '</div></div>';
+  }
+
+  function chipDefs() {
+    return state.mode === 'ev' ? [['fast', '最快完成'], ['dist', '最近'], ['power', '最高功率']] : [['value', '最划算'], ['price', '最平'], ['dist', '最近']];
+  }
+  function renderChips() {
+    var defs = chipDefs();
+    if (!defs.some(function (d) { return d[0] === state.sort; })) state.sort = defs[0][0];
+    $('chips').innerHTML = defs.map(function (d) { return '<button type="button" class="chip" data-sort="' + d[0] + '" aria-pressed="' + (d[0] === state.sort) + '">' + d[1] + '</button>'; }).join('');
+  }
+  function renderList() {
+    var ev = state.mode === 'ev';
+    if (state.status === 'ok' && view && view.items.length) {
+      $('count').textContent = view.items.length + ' 個站 · ' + Math.round(CONFIG.RADIUS_M / 1609.34) + ' mi 內';
+      $('list').innerHTML = view.items.map(function (it, i) {
+        var s = it.s, big = ev ? (s.ev.kw ? Math.round(s.ev.kw) : '?') : it.m.p.toFixed(1);
+        var sub = (ev ? (s.ev.sockets.length ? s.ev.sockets.join(' · ') + ' · ' : '') : (s.street ? s.street + ' · ' : '')) + miText(it) + ' · ' + minText(it) + (ev ? '' : ' · 總 ' + money(it.m.total));
+        return '<button type="button" class="card" data-id="' + esc(s.id) + '" aria-pressed="' + (s.id === state.sel) + '"><span class="rank">' + (i + 1) + '</span>' +
+          '<span class="c-name">' + esc(s.name) + (it === view.best ? '<em>' + (ev ? '最快' : '最划算') + '</em>' : '') + '</span>' +
+          '<span class="c-price"><i class="dot" style="background:var(--' + it.tone + ')"></i>' + big + '<small>' + (ev ? 'kW' : 'p') + '</small></span>' +
+          '<span class="c-sub">' + esc(sub) + '</span></button>';
+      }).join('');
+    } else {
+      $('count').textContent = '';
+      $('list').innerHTML = state.status === 'ok' ? '<p class="empty">沒有符合的站點。</p>' : '';
+    }
+  }
+  function renderLegend() {
+    $('legend').innerHTML = state.mode === 'ev'
+      ? '<span><i style="background:var(--ev)"></i>≥50 kW</span><span><i style="background:var(--ev2)"></i>22–49 kW</span><span><i style="background:var(--slow)"></i>慢充/未知</span>'
+      : '<span><i style="background:var(--good)"></i>平</span><span><i style="background:var(--warn)"></i>中</span><span><i style="background:var(--bad)"></i>貴</span><span>★ 最划算</span>';
+    $('sub').textContent = state.mode === 'ev' ? '站點來自 OpenStreetMap · 電價和空位暫無資料' : (CONFIG.PRICE_API_URL ? '站點來自 OpenStreetMap · 價錢來自官方資料' : '站點來自 OpenStreetMap · 價錢為示範');
+  }
+  function renderCar() {
+    var ev = state.mode === 'ev';
+    var fields = ev ? [['kwh', '預計充電量 (kWh)'], ['maxkw', '車的最大充電功率 (kW)']] : [['litres', '加油量 (L)'], ['mpg', '油耗 (mpg)']];
+    $('carGrid').innerHTML = fields.map(function (f) { return '<label>' + f[1] + '<input type="number" inputmode="decimal" min="1" step="1" data-car="' + f[0] + '" value="' + state.car[f[0]] + '"></label>'; }).join('');
+  }
+  function renderFoot() { $('foot').textContent = '地圖 © OpenStreetMap 貢獻者 · OpenFreeMap · 路線 OSRM。路程和時間按你目前的位置計算。'; }
+
+  /* ===== 地圖標籤 ===== */
+  function clearPins() { pins.forEach(function (p) { p.marker.remove(); }); pins = []; }
+  function buildPins() {
+    clearPins();
+    if (!mapReady || !view) return;
+    view.items.forEach(function (it, rank) {
+      var s = it.s, ev = s.kind === 'ev', el = document.createElement('div');
+      el.className = 'pin' + (it === view.best ? ' best' : '') + (s.id === state.sel ? ' sel' : '');
+      el.style.setProperty('--c', 'var(--' + it.tone + ')');
+      var pr = ev ? (s.ev.kw ? Math.round(s.ev.kw) + ' kW' : '? kW') : it.m.p.toFixed(1);
+      el.innerHTML = '<div class="bubble"><span class="nm">' + (it === view.best ? '★ ' : '') + esc(short(s.name)) + '</span><span class="pr">' + esc(pr) + '</span></div>';
+      el.addEventListener('click', function (e) { e.stopPropagation(); selectStation(s.id, true); });
+      var marker = new maplibregl.Marker({ element: el, anchor: 'bottom', offset: [0, -4] }).setLngLat([s.lng, s.lat]).addTo(map);
+      el.style.zIndex = it === view.best || s.id === state.sel ? 1000 : String(500 - rank);
+      pins.push({ el: el, marker: marker, it: it, name: short(s.name) + pr });
+    });
+    layoutPins();
+  }
+  function layoutPins() {
+    if (!mapReady) return;
+    var placed = [];
+    pins.slice().sort(function (a, b) { return Number(b.el.style.zIndex) - Number(a.el.style.zIndex); }).forEach(function (p) {
+      var pt = map.project([p.it.s.lng, p.it.s.lat]), w = 22 + p.name.length * 7.4, h = 30;
+      var r = { x: pt.x - w / 2, y: pt.y - h - 8, w: w, h: h };
+      var force = p.el.classList.contains('best') || p.el.classList.contains('sel');
+      var hit = !force && placed.some(function (q) { return r.x < q.x + q.w + 2 && r.x + r.w + 2 > q.x && r.y < q.y + q.h + 2 && r.y + r.h + 2 > q.y; });
+      p.el.classList.toggle('dot', hit);
+      if (!hit) placed.push(r);
+    });
+  }
+  function stylePins() {
+    pins.forEach(function (p) {
+      var sel = p.it.s.id === state.sel;
+      p.el.classList.toggle('sel', sel);
+      p.el.style.zIndex = sel || p.it === view.best ? 1000 : p.el.style.zIndex;
+    });
+    layoutPins();
+  }
+
+  /* ===== 路線 ===== */
+  function setRoute(geom) {
+    if (!mapReady || !map.getSource('route')) return;
+    map.getSource('route').setData(geom ? { type: 'Feature', geometry: geom } : { type: 'FeatureCollection', features: [] });
+  }
+  function selectStation(id, manual) {
+    if (manual) state.manual = true;
+    state.sel = id;
+    var it = view && view.items.filter(function (x) { return x.s.id === id; })[0];
+    renderHero(); document.querySelectorAll('.card').forEach(function (c) { c.setAttribute('aria-pressed', c.dataset.id === id); });
+    if (manual) { var c = document.querySelector('.card[data-id="' + id + '"]'); if (c && c.scrollIntoView) c.scrollIntoView({ block: 'nearest' }); }
+    stylePins();
+    if (!it) { setRoute(null); return; }
+    var s = it.s, tok = ++routeTok, u = state.user;
+    var straight = { type: 'LineString', coordinates: [[u.lng, u.lat], [s.lng, s.lat]] };
+    setRoute(null);
+    fitTo(s);
+    fetch(CONFIG.OSRM + '/route/v1/driving/' + u.lng + ',' + u.lat + ';' + s.lng + ',' + s.lat + '?overview=full&geometries=geojson')
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function (j) {
+        if (tok !== routeTok || !j.routes || !j.routes[0]) return;
+        var r = j.routes[0]; s.road = { m: r.distance, s: r.duration, exact: true };
+        setRoute(r.geometry); render(false);
+      }).catch(function () { if (tok === routeTok) { setRoute(straight); toast('路線讀不到,先顯示直線。'); } });
+  }
+  function fitTo(s) {
+    if (!mapReady) return;
+    var u = state.user, b = new maplibregl.LngLatBounds([u.lng, u.lat], [u.lng, u.lat]); b.extend([s.lng, s.lat]);
+    map.fitBounds(b, { padding: { top: 70, bottom: 60, left: 50, right: 70 }, maxZoom: 16, duration: 700 });
+  }
+
+  function render(autoSelect) {
+    view = buildView();
+    renderChips(); renderLegend(); renderCar();
+    var has = view.items.some(function (x) { return x.s.id === state.sel; });
+    if (autoSelect || !has) {
+      var prev = state.sel;
+      state.sel = view.best ? view.best.s.id : null;
+      renderHero(); renderList(); buildPins();
+      if (state.sel && (state.sel !== prev || autoSelect)) selectStation(state.sel, false); else if (!state.sel) setRoute(null);
+      return;
+    }
+    renderHero(); renderList(); buildPins();
+  }
+
+  function toast(msg) {
+    var el = $('toast'); el.textContent = msg; el.hidden = false;
+    clearTimeout(toastTimer); toastTimer = setTimeout(function () { el.hidden = true; }, 5000);
+  }
+
+  /* ===== 位置 ===== */
+  function setUser(lat, lng, source, fly) {
+    state.user = { lat: lat, lng: lng, source: source };
+    state.stations.forEach(function (s) { s.road = null; });
+    if (userMarker) userMarker.setLngLat([lng, lat]);
+    if (fly && mapReady) map.flyTo({ center: [lng, lat], zoom: 13.5, duration: 800 });
+    loadStations({ lat: lat, lng: lng });
+  }
+  function locate(initial) {
+    if (!navigator.geolocation) { if (initial) setUser(CONFIG.DEFAULT.lat, CONFIG.DEFAULT.lng, 'default', false); toast('這個瀏覽器不支援定位,已用 Guildford 市中心。拖動藍點可改位置。'); return; }
+    navigator.geolocation.getCurrentPosition(function (pos) {
+      setUser(pos.coords.latitude, pos.coords.longitude, 'gps', true);
+    }, function () {
+      if (initial) setUser(CONFIG.DEFAULT.lat, CONFIG.DEFAULT.lng, 'default', false);
+      toast('讀不到你的位置,已用 Guildford 市中心。拖動藍點可改位置,或在瀏覽器允許定位後按「定位」。');
+    }, { enableHighAccuracy: true, timeout: 9000, maximumAge: 60000 });
+  }
+
+  /* ===== 事件 ===== */
+  document.querySelector('.seg').addEventListener('click', function (e) {
+    var b = e.target.closest('[data-mode]'); if (!b || b.dataset.mode === state.mode) return;
+    state.mode = b.dataset.mode; state.sort = state.mode === 'ev' ? 'fast' : 'value'; state.manual = false;
+    $('app').setAttribute('data-mode', state.mode);
+    document.querySelectorAll('.seg button').forEach(function (x) { x.setAttribute('aria-pressed', x === b); });
+    render(true); refineRoads(token);
+  });
+  $('chips').addEventListener('click', function (e) {
+    var b = e.target.closest('[data-sort]'); if (!b) return;
+    state.sort = b.dataset.sort; render(false);
+  });
+  $('list').addEventListener('click', function (e) { var c = e.target.closest('.card'); if (c) selectStation(c.dataset.id, true); });
+  $('hero').addEventListener('click', function (e) {
+    if (e.target.id === 'goBest' && view && view.best) { state.manual = false; selectStation(view.best.s.id, false); }
+    if (e.target.id === 'retry') loadStations(state.center || state.user);
+  });
+  $('carGrid').addEventListener('change', function (e) {
+    var k = e.target.dataset.car, v = parseFloat(e.target.value);
+    if (!k || !(v > 0)) { renderCar(); return; }
+    state.car[k] = v; store.set('car', state.car); render(false);
+  });
+  $('locBtn').addEventListener('click', function () { locate(false); });
+  $('tiltBtn').addEventListener('click', function () { if (mapReady) map.easeTo({ pitch: map.getPitch() > 10 ? 0 : 55, duration: 600 }); });
+  $('hereBtn').addEventListener('click', function () { var c = map.getCenter(); loadStations({ lat: c.lat, lng: c.lng }); });
+
+  /* ===== 啟動 ===== */
+  function start() {
+    map = new maplibregl.Map({ container: 'map', style: CONFIG.STYLE, center: [state.user.lng, state.user.lat], zoom: 13, pitch: 55, bearing: -12, attributionControl: false, maxPitch: 75 });
+    map.addControl(new maplibregl.AttributionControl({ compact: true }));
+    map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), 'bottom-right');
+    var errShown = false;
+    map.on('error', function () { if (!errShown) { errShown = true; toast('地圖資料載入有問題,請檢查網絡。'); } });
+    map.on('load', function () {
+      map.addSource('route', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+      map.addLayer({ id: 'route-casing', type: 'line', source: 'route', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#ffffff', 'line-width': 10 } });
+      map.addLayer({ id: 'route-line', type: 'line', source: 'route', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#1a73e8', 'line-width': 6 } });
+      mapReady = true;
+      if (view) { buildPins(); if (state.sel) selectStation(state.sel, false); }
+    });
+    map.on('moveend', function () {
+      clearTimeout(layoutTimer); layoutTimer = setTimeout(layoutPins, 60);
+      $('tiltBtn').textContent = map.getPitch() > 10 ? '2D' : '3D';
+      if (state.center && state.status === 'ok') {
+        var c = map.getCenter();
+        $('hereBtn').hidden = hav(state.center, { lat: c.lat, lng: c.lng }) < 3000;
+      }
+    });
+    var el = document.createElement('div'); el.className = 'me'; el.title = '你的位置(可拖動)';
+    userMarker = new maplibregl.Marker({ element: el, draggable: true }).setLngLat([state.user.lng, state.user.lat]).addTo(map);
+    userMarker.on('dragend', function () { var p = userMarker.getLngLat(); setUser(p.lat, p.lng, 'manual', false); });
+    renderChips(); renderLegend(); renderCar(); renderFoot(); renderHero();
+    locate(true);
+  }
+  if (window.maplibregl) start();
+  else $('map').innerHTML = '<p style="padding:24px;color:#667085">無法載入地圖。如果你是在 Claude 的預覽視窗看到這段文字,請把檔案下載後用 Chrome 或 Edge 開啟;預覽視窗會擋掉地圖資料。</p>';
+})();
+</script>
+</body>
+</html>
